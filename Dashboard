@@ -1,0 +1,497 @@
+"""
+ARC Crypto Dashboard — Circle's Layer-1 Blockchain
+Дашборд для відстеження токена ARC (Circle Arc Network)
+"""
+
+import dash
+from dash import dcc, html, Input, Output, callback
+import plotly.graph_objects as go
+import plotly.express as px
+import requests
+import pandas as pd
+from datetime import datetime, timedelta
+import json
+
+# ─────────────────────────────────────────────
+# КОНФІГУРАЦІЯ
+# ─────────────────────────────────────────────
+# ARC token CoinGecko ID (використовуємо наявний ARC token)
+COINGECKO_BASE = "https://api.coingecko.com/api/v3"
+TOKEN_ID = "arc"       # ARC (AI infrastructure token)
+VS_CURRENCY = "usd"
+
+# Кольорова схема Arc / Circle
+COLORS = {
+    "bg_dark":     "#080B14",
+    "bg_card":     "#0D1120",
+    "bg_elevated": "#121827",
+    "accent":      "#4F8EF7",      # Arc blue
+    "accent2":     "#7B5CF0",      # purple
+    "accent3":     "#00D4AA",      # teal/green
+    "warn":        "#F7704F",
+    "text":        "#E8EDF5",
+    "text_muted":  "#6B7A99",
+    "border":      "#1E2A40",
+    "green":       "#22C55E",
+    "red":         "#EF4444",
+    "grid":        "#141C30",
+}
+
+# ─────────────────────────────────────────────
+# ОТРИМАННЯ ДАНИХ
+# ─────────────────────────────────────────────
+
+def fetch_price_data():
+    """Поточна ціна та ринкові дані"""
+    try:
+        url = f"{COINGECKO_BASE}/simple/price"
+        params = {
+            "ids": TOKEN_ID,
+            "vs_currencies": VS_CURRENCY,
+            "include_market_cap": "true",
+            "include_24hr_vol": "true",
+            "include_24hr_change": "true",
+            "include_last_updated_at": "true",
+        }
+        r = requests.get(url, params=params, timeout=10)
+        r.raise_for_status()
+        data = r.json().get(TOKEN_ID, {})
+        return {
+            "price":      data.get(f"{VS_CURRENCY}", 0),
+            "market_cap": data.get(f"{VS_CURRENCY}_market_cap", 0),
+            "volume_24h": data.get(f"{VS_CURRENCY}_24h_vol", 0),
+            "change_24h": data.get(f"{VS_CURRENCY}_24h_change", 0),
+            "updated_at": data.get("last_updated_at", 0),
+        }
+    except Exception as e:
+        print(f"[price] error: {e}")
+        return {"price": 0, "market_cap": 0, "volume_24h": 0, "change_24h": 0, "updated_at": 0}
+
+
+def fetch_ohlc(days=30):
+    """OHLC-свічки"""
+    try:
+        url = f"{COINGECKO_BASE}/coins/{TOKEN_ID}/ohlc"
+        params = {"vs_currency": VS_CURRENCY, "days": days}
+        r = requests.get(url, params=params, timeout=10)
+        r.raise_for_status()
+        raw = r.json()
+        df = pd.DataFrame(raw, columns=["timestamp", "open", "high", "low", "close"])
+        df["date"] = pd.to_datetime(df["timestamp"], unit="ms")
+        return df
+    except Exception as e:
+        print(f"[ohlc] error: {e}")
+        return pd.DataFrame()
+
+
+def fetch_market_chart(days=90):
+    """Графік ціни і обсягу"""
+    try:
+        url = f"{COINGECKO_BASE}/coins/{TOKEN_ID}/market_chart"
+        params = {"vs_currency": VS_CURRENCY, "days": days, "interval": "daily"}
+        r = requests.get(url, params=params, timeout=10)
+        r.raise_for_status()
+        data = r.json()
+        prices = pd.DataFrame(data.get("prices", []), columns=["timestamp", "price"])
+        volumes = pd.DataFrame(data.get("total_volumes", []), columns=["timestamp", "volume"])
+        prices["date"] = pd.to_datetime(prices["timestamp"], unit="ms")
+        volumes["date"] = pd.to_datetime(volumes["timestamp"], unit="ms")
+        return prices, volumes
+    except Exception as e:
+        print(f"[chart] error: {e}")
+        return pd.DataFrame(), pd.DataFrame()
+
+
+def fetch_coin_info():
+    """Детальна інформація про монету"""
+    try:
+        url = f"{COINGECKO_BASE}/coins/{TOKEN_ID}"
+        params = {"localization": "false", "tickers": "false", "community_data": "true", "developer_data": "false"}
+        r = requests.get(url, params=params, timeout=10)
+        r.raise_for_status()
+        return r.json()
+    except Exception as e:
+        print(f"[info] error: {e}")
+        return {}
+
+
+# ─────────────────────────────────────────────
+# ДОПОМІЖНІ ФУНКЦІЇ
+# ─────────────────────────────────────────────
+
+def fmt_usd(value, decimals=6):
+    if value is None or value == 0:
+        return "$0"
+    if value >= 1e9:
+        return f"${value/1e9:.2f}B"
+    if value >= 1e6:
+        return f"${value/1e6:.2f}M"
+    if value >= 1e3:
+        return f"${value/1e3:.2f}K"
+    return f"${value:.{decimals}f}"
+
+
+def pct_color(val):
+    return COLORS["green"] if val >= 0 else COLORS["red"]
+
+
+def make_kpi_card(title, value, subtitle=None, color=None):
+    return html.Div([
+        html.P(title, style={"margin": 0, "fontSize": "11px", "letterSpacing": "1.5px",
+                              "textTransform": "uppercase", "color": COLORS["text_muted"],
+                              "fontWeight": "600"}),
+        html.H2(value, style={"margin": "6px 0 2px", "fontSize": "26px", "fontWeight": "700",
+                               "color": color or COLORS["text"], "fontFamily": "'Space Mono', monospace"}),
+        html.P(subtitle or "", style={"margin": 0, "fontSize": "12px", "color": COLORS["text_muted"]}),
+    ], style={
+        "background": COLORS["bg_card"],
+        "border": f"1px solid {COLORS['border']}",
+        "borderRadius": "12px",
+        "padding": "20px 24px",
+        "flex": "1",
+        "minWidth": "160px",
+        "position": "relative",
+        "overflow": "hidden",
+    })
+
+
+# ─────────────────────────────────────────────
+# ГРАФІКИ
+# ─────────────────────────────────────────────
+
+def make_price_chart(days_df, vol_df):
+    fig = go.Figure()
+    if not days_df.empty:
+        fig.add_trace(go.Scatter(
+            x=days_df["date"], y=days_df["price"],
+            mode="lines", name="Ціна",
+            line=dict(color=COLORS["accent"], width=2),
+            fill="tozeroy",
+            fillcolor="rgba(79,142,247,0.08)",
+            hovertemplate="<b>%{x|%d %b %Y}</b><br>$%{y:.6f}<extra></extra>",
+        ))
+    if not vol_df.empty:
+        fig.add_trace(go.Bar(
+            x=vol_df["date"], y=vol_df["volume"],
+            name="Обсяг", yaxis="y2",
+            marker_color="rgba(123,92,240,0.35)",
+            hovertemplate="Обсяг: $%{y:,.0f}<extra></extra>",
+        ))
+    fig.update_layout(
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font=dict(color=COLORS["text"], family="'Inter', sans-serif", size=12),
+        legend=dict(orientation="h", y=1.08, x=0, font_size=11,
+                    bgcolor="rgba(0,0,0,0)", bordercolor="rgba(0,0,0,0)"),
+        margin=dict(l=0, r=0, t=30, b=0),
+        xaxis=dict(gridcolor=COLORS["grid"], showline=False, zeroline=False,
+                   tickfont=dict(size=11, color=COLORS["text_muted"])),
+        yaxis=dict(gridcolor=COLORS["grid"], showline=False, zeroline=False,
+                   tickformat="$.6f", tickfont=dict(size=11, color=COLORS["text_muted"]),
+                   side="left"),
+        yaxis2=dict(overlaying="y", side="right", showgrid=False, zeroline=False,
+                    tickformat="$.2s", tickfont=dict(size=10, color=COLORS["text_muted"])),
+        hovermode="x unified",
+    )
+    return fig
+
+
+def make_ohlc_chart(df):
+    fig = go.Figure()
+    if not df.empty:
+        colors = [COLORS["green"] if c >= o else COLORS["red"]
+                  for c, o in zip(df["close"], df["open"])]
+        fig.add_trace(go.Candlestick(
+            x=df["date"],
+            open=df["open"], high=df["high"],
+            low=df["low"], close=df["close"],
+            increasing_line_color=COLORS["green"],
+            decreasing_line_color=COLORS["red"],
+            name="OHLC",
+        ))
+    fig.update_layout(
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font=dict(color=COLORS["text"], family="'Inter', sans-serif", size=12),
+        margin=dict(l=0, r=0, t=10, b=0),
+        xaxis=dict(gridcolor=COLORS["grid"], showline=False, zeroline=False, rangeslider=dict(visible=False),
+                   tickfont=dict(size=11, color=COLORS["text_muted"])),
+        yaxis=dict(gridcolor=COLORS["grid"], showline=False, zeroline=False,
+                   tickformat="$.7f", tickfont=dict(size=11, color=COLORS["text_muted"])),
+        xaxis_rangeslider_visible=False,
+    )
+    return fig
+
+
+def make_gauge(change_pct):
+    abs_val = abs(change_pct)
+    sentiment = "BULLISH" if change_pct >= 0 else "BEARISH"
+    color = COLORS["green"] if change_pct >= 0 else COLORS["red"]
+    fig = go.Figure(go.Indicator(
+        mode="gauge+number",
+        value=50 + min(change_pct * 2, 48),   # normalize to 0-100
+        number=dict(suffix="%", valueformat="+.2f",
+                    font=dict(color=color, size=28, family="'Space Mono', monospace")),
+        gauge=dict(
+            axis=dict(range=[0, 100], tickwidth=0, tickcolor="rgba(0,0,0,0)"),
+            bar=dict(color=color, thickness=0.2),
+            bgcolor="rgba(0,0,0,0)",
+            borderwidth=0,
+            steps=[
+                dict(range=[0, 20], color="rgba(239,68,68,0.15)"),
+                dict(range=[20, 45], color="rgba(239,68,68,0.08)"),
+                dict(range=[45, 55], color="rgba(107,122,153,0.08)"),
+                dict(range=[55, 80], color="rgba(34,197,94,0.08)"),
+                dict(range=[80, 100], color="rgba(34,197,94,0.15)"),
+            ],
+            threshold=dict(line=dict(color=color, width=3), thickness=0.8, value=50 + min(change_pct * 2, 48)),
+        ),
+        title=dict(text=f"<b>{sentiment}</b>", font=dict(size=13, color=color)),
+        domain=dict(x=[0, 1], y=[0, 1]),
+    ))
+    fig.update_layout(
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        margin=dict(l=20, r=20, t=30, b=10),
+        height=180,
+        font=dict(color=COLORS["text"]),
+    )
+    return fig
+
+
+# ─────────────────────────────────────────────
+# LAYOUT
+# ─────────────────────────────────────────────
+
+app = dash.Dash(
+    __name__,
+    title="ARC Dashboard",
+    external_stylesheets=[
+        "https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Space+Mono:wght@400;700&display=swap"
+    ],
+    meta_tags=[{"name": "viewport", "content": "width=device-width, initial-scale=1.0"}],
+    suppress_callback_exceptions=True,
+)
+
+app.layout = html.Div([
+
+    # ── HEADER ───────────────────────────────
+    html.Div([
+        html.Div([
+            html.Div([
+                html.Span("◈", style={"fontSize": "28px", "color": COLORS["accent"], "marginRight": "10px"}),
+                html.Span("ARC", style={"fontSize": "22px", "fontWeight": "700", "letterSpacing": "2px",
+                                         "color": COLORS["text"], "fontFamily": "'Space Mono', monospace"}),
+                html.Span("DASHBOARD", style={"fontSize": "11px", "color": COLORS["text_muted"],
+                                               "letterSpacing": "3px", "marginLeft": "10px",
+                                               "alignSelf": "flex-end", "paddingBottom": "2px"}),
+            ], style={"display": "flex", "alignItems": "center"}),
+            html.P("Circle Arc Network · Layer-1 Blockchain · AI-Powered Finance",
+                   style={"margin": "4px 0 0", "fontSize": "12px", "color": COLORS["text_muted"]}),
+        ]),
+        html.Div([
+            html.Span("● LIVE", style={"color": COLORS["green"], "fontSize": "11px",
+                                        "letterSpacing": "1px", "fontWeight": "600",
+                                        "fontFamily": "'Space Mono', monospace"}),
+            html.Span(id="last-updated", style={"color": COLORS["text_muted"], "fontSize": "11px",
+                                                  "marginLeft": "10px"}),
+        ], style={"display": "flex", "alignItems": "center"}),
+    ], style={
+        "display": "flex", "justifyContent": "space-between", "alignItems": "flex-start",
+        "padding": "24px 32px 20px",
+        "borderBottom": f"1px solid {COLORS['border']}",
+        "background": COLORS["bg_dark"],
+    }),
+
+    # ── CONTROLS ─────────────────────────────
+    html.Div([
+        html.Div([
+            html.Label("Період", style={"color": COLORS["text_muted"], "fontSize": "11px",
+                                         "letterSpacing": "1px", "textTransform": "uppercase",
+                                         "marginBottom": "6px", "display": "block"}),
+            dcc.RadioItems(
+                id="period-selector",
+                options=[
+                    {"label": "7д", "value": 7},
+                    {"label": "14д", "value": 14},
+                    {"label": "30д", "value": 30},
+                    {"label": "90д", "value": 90},
+                ],
+                value=30,
+                inline=True,
+                style={"gap": "8px"},
+                inputStyle={"display": "none"},
+                labelStyle={
+                    "padding": "6px 14px", "borderRadius": "6px", "cursor": "pointer",
+                    "fontSize": "12px", "fontWeight": "600", "fontFamily": "'Space Mono', monospace",
+                    "border": f"1px solid {COLORS['border']}", "color": COLORS["text_muted"],
+                    "background": COLORS["bg_card"], "marginRight": "4px",
+                },
+            ),
+        ]),
+        html.Button(
+            "↺ Оновити", id="refresh-btn", n_clicks=0,
+            style={
+                "padding": "8px 18px", "border": f"1px solid {COLORS['accent']}",
+                "borderRadius": "6px", "background": "rgba(79,142,247,0.1)",
+                "color": COLORS["accent"], "cursor": "pointer", "fontSize": "12px",
+                "fontWeight": "600", "fontFamily": "'Space Mono', monospace", "letterSpacing": "0.5px",
+            }
+        ),
+    ], style={
+        "display": "flex", "justifyContent": "space-between", "alignItems": "flex-end",
+        "padding": "16px 32px",
+        "background": COLORS["bg_dark"],
+    }),
+
+    # ── KPI ROW ──────────────────────────────
+    html.Div(id="kpi-row", style={
+        "display": "flex", "gap": "12px", "padding": "0 32px 20px",
+        "background": COLORS["bg_dark"], "flexWrap": "wrap",
+    }),
+
+    # ── CHARTS ROW 1 ─────────────────────────
+    html.Div([
+        html.Div([
+            html.P("Динаміка ціни та обсяг", style={"margin": "0 0 16px",
+                    "color": COLORS["text"], "fontSize": "13px", "fontWeight": "600",
+                    "letterSpacing": "0.5px"}),
+            dcc.Graph(id="price-chart", config={"displayModeBar": False},
+                      style={"height": "300px"}),
+        ], style={"background": COLORS["bg_card"], "border": f"1px solid {COLORS['border']}",
+                   "borderRadius": "12px", "padding": "20px", "flex": "2", "minWidth": "300px"}),
+
+        html.Div([
+            html.P("Сентимент 24г", style={"margin": "0 0 4px",
+                    "color": COLORS["text"], "fontSize": "13px", "fontWeight": "600"}),
+            dcc.Graph(id="sentiment-gauge", config={"displayModeBar": False}),
+            html.Div(id="arc-info-block", style={"marginTop": "8px"}),
+        ], style={"background": COLORS["bg_card"], "border": f"1px solid {COLORS['border']}",
+                   "borderRadius": "12px", "padding": "20px", "flex": "1", "minWidth": "240px"}),
+    ], style={"display": "flex", "gap": "12px", "padding": "0 32px 12px",
+               "background": COLORS["bg_dark"], "flexWrap": "wrap"}),
+
+    # ── CHARTS ROW 2 ─────────────────────────
+    html.Div([
+        html.Div([
+            html.P("Свічковий графік (OHLC)", style={"margin": "0 0 16px",
+                    "color": COLORS["text"], "fontSize": "13px", "fontWeight": "600",
+                    "letterSpacing": "0.5px"}),
+            dcc.Graph(id="ohlc-chart", config={"displayModeBar": False},
+                      style={"height": "280px"}),
+        ], style={"background": COLORS["bg_card"], "border": f"1px solid {COLORS['border']}",
+                   "borderRadius": "12px", "padding": "20px", "flex": "1", "minWidth": "300px"}),
+
+        html.Div([
+            html.P("Про проект ARC", style={"margin": "0 0 14px",
+                    "color": COLORS["text"], "fontSize": "13px", "fontWeight": "600"}),
+            *[html.Div([
+                html.Span(icon, style={"fontSize": "16px", "marginRight": "10px"}),
+                html.Span(text, style={"fontSize": "12px", "color": COLORS["text_muted"],
+                                        "lineHeight": "1.5"}),
+            ], style={"display": "flex", "alignItems": "flex-start", "marginBottom": "14px"})
+            for icon, text in [
+                ("🔵", "Layer-1 блокчейн від Circle (USDC), залучено $222M від BlackRock, a16z, Goldman Sachs"),
+                ("⚡", "Газ оплачується в USDC — передбачувані комісії без волатильності"),
+                ("🔒", "Opt-in приватність транзакцій, інституційний рівень безпеки"),
+                ("🤖", "Оптимізовано для AI-агентів та автоматизованих фінансових систем"),
+                ("🏛️", "Тестнет з жовтня 2025, mainnet beta очікується у 2026"),
+                ("📊", "ARC токен — управління, стейкінг, proof-of-stake перехід"),
+            ]],
+        ], style={"background": COLORS["bg_card"], "border": f"1px solid {COLORS['border']}",
+                   "borderRadius": "12px", "padding": "20px 24px", "flex": "0.6", "minWidth": "240px"}),
+    ], style={"display": "flex", "gap": "12px", "padding": "0 32px 24px",
+               "background": COLORS["bg_dark"], "flexWrap": "wrap"}),
+
+    # ── FOOTER ───────────────────────────────
+    html.Div([
+        html.Span("ARC Dashboard · Дані: CoinGecko API · Лише для інформації, не є фінансовою порадою",
+                   style={"color": COLORS["text_muted"], "fontSize": "11px"}),
+    ], style={
+        "padding": "16px 32px", "borderTop": f"1px solid {COLORS['border']}",
+        "background": COLORS["bg_dark"], "textAlign": "center",
+    }),
+
+    # ── AUTO-REFRESH ─────────────────────────
+    dcc.Interval(id="auto-refresh", interval=60_000, n_intervals=0),
+
+], style={"background": COLORS["bg_dark"], "minHeight": "100vh",
+           "fontFamily": "'Inter', sans-serif", "color": COLORS["text"]})
+
+
+# ─────────────────────────────────────────────
+# CALLBACKS
+# ─────────────────────────────────────────────
+
+@app.callback(
+    Output("kpi-row", "children"),
+    Output("price-chart", "figure"),
+    Output("ohlc-chart", "figure"),
+    Output("sentiment-gauge", "figure"),
+    Output("arc-info-block", "children"),
+    Output("last-updated", "children"),
+    Input("auto-refresh", "n_intervals"),
+    Input("refresh-btn", "n_clicks"),
+    Input("period-selector", "value"),
+)
+def update_all(_, __, days):
+    price_data = fetch_price_data()
+    prices_df, vol_df = fetch_market_chart(days=days)
+    ohlc_df = fetch_ohlc(days=min(days, 30))
+
+    price = price_data.get("price", 0)
+    change = price_data.get("change_24h", 0)
+    mcap = price_data.get("market_cap", 0)
+    vol = price_data.get("volume_24h", 0)
+    change_sign = "▲" if change >= 0 else "▼"
+    change_color = pct_color(change)
+
+    # KPI cards
+    kpi = [
+        make_kpi_card("Ціна ARC", fmt_usd(price),
+                      f"{change_sign} {abs(change):.2f}% за 24г", change_color),
+        make_kpi_card("Ринкова капіталізація", fmt_usd(mcap),
+                      "Загальна вартість ринку"),
+        make_kpi_card("Обсяг 24г", fmt_usd(vol),
+                      "Торговий обсяг за добу"),
+        make_kpi_card("Зміна 24г", f"{change_sign} {abs(change):.2f}%",
+                      "Відносна зміна ціни", change_color),
+    ]
+
+    # Gauge info
+    ratio = vol / mcap if mcap > 0 else 0
+    info_block = html.Div([
+        html.Div([
+            html.Span("Vol/MCap", style={"fontSize": "11px", "color": COLORS["text_muted"]}),
+            html.Span(f"{ratio:.2%}", style={"fontSize": "12px", "fontWeight": "600",
+                                               "color": COLORS["accent2"],
+                                               "fontFamily": "'Space Mono', monospace",
+                                               "float": "right"}),
+        ], style={"borderBottom": f"1px solid {COLORS['border']}", "paddingBottom": "8px", "marginBottom": "8px"}),
+        html.P("Активність ринку: "
+               + ("Висока 🔥" if ratio > 0.1 else "Середня ⚡" if ratio > 0.03 else "Низька 💤"),
+               style={"fontSize": "11px", "color": COLORS["text_muted"], "margin": 0}),
+    ])
+
+    ts = datetime.now().strftime("%H:%M:%S")
+
+    return (kpi,
+            make_price_chart(prices_df, vol_df),
+            make_ohlc_chart(ohlc_df),
+            make_gauge(change),
+            info_block,
+            f"Оновлено: {ts}")
+
+
+# ─────────────────────────────────────────────
+# ЗАПУСК
+# ─────────────────────────────────────────────
+if __name__ == "__main__":
+    print("=" * 55)
+    print("  ◈ ARC CRYPTO DASHBOARD")
+    print("  Circle Arc Network · Layer-1 Blockchain")
+    print("=" * 55)
+    print("  → http://127.0.0.1:8050")
+    print("  Дані оновлюються кожну хвилину")
+    print("=" * 55)
+    app.run(debug=False, host="0.0.0.0", port=8050)
